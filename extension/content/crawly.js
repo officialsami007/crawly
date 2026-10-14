@@ -1123,7 +1123,7 @@ function planToSteps(plan, snap, els) {
 // Text that shows up while a generated test runs (banners, toasts, validation messages),
 // caught even if it disappears again a few seconds later.
 let watch = null;
-function startWatch(auto) {
+function startWatch(auto, seed) {
   stopWatch();
   const seen = [], sem = {};
   const add = el => {
@@ -1143,6 +1143,8 @@ function startWatch(auto) {
   });
   obs.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style', 'hidden', 'aria-hidden'] });
   watch = { seen, sem, obs, auto };
+  // after a navigation the new page's messages were there before we started watching
+  if (seed) document.querySelectorAll('h1, h2, h3, [role="alert"], [role="status"], p, .alert').forEach((el, k) => { if (k < 12 && isVisible(el)) add(el); });
 }
 function stopWatch() { if (watch) { watch.obs.disconnect(); watch = null; } }
 
@@ -1609,7 +1611,7 @@ async function runAutomation(auto, startIndex, resumed) {
   running = true;
   const steps = auto.steps || [];
   let sawSuccess = null;
-  if (auto.generated) startWatch(auto);
+  if (auto.generated) startWatch(auto, resumed);
   try {
     await dropIn(W / 2);
     powAt('WHOOSH!', spider.x, spider.y - 46, false);
