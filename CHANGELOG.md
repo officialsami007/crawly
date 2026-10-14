@@ -14,13 +14,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   is confident (60% or more), announcing the match. Otherwise the run fails as
   before.
 - Optional AI second opinion for the cases the local scorer is unsure about.
-  Off by default; pick Laya (free, runs locally via `laya-serve`) or Jev
+  Off by default; pick Laya (free, runs locally via `scripts/laya_server.py`) or Jev
   (hosted, bring your own API key) in the popup.
 
 ### Changed
 
 - A missing click target is no longer replaced by whatever sits at the recorded
-  coordinates until self-healing has had a chance to find it.
+  coordinates until self-healing has had a chance to find it, and that
+  coordinate fallback now only accepts the same kind of control (it used to
+  click any element at the old spot, so a removed button could pass the run by
+  clicking an unrelated link).
+- Click steps now record the button type (`submit`, `button`, ...).
 
 ## [1.3.0] - 2025
 

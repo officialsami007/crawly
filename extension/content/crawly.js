@@ -846,8 +846,13 @@ async function resolveStep(step, timeout, usePoint = true) {
       if (m) return m;
     }
     if (usePoint && step.type === 'click' && step.x != null) {
-      const m = document.elementFromPoint(clamp(step.x, 0, W - 1), clamp(step.y, 0, H - 1));
-      if (m && m !== document.body && m !== document.documentElement && !host.contains(m)) return m;
+      const hit = document.elementFromPoint(clamp(step.x, 0, W - 1), clamp(step.y, 0, H - 1));
+      if (hit && !host.contains(hit)) {
+        // only the same kind of control counts; a different element that merely
+        // sits at the old spot (say, a link after the button was removed) does not
+        const m = hit.closest(CAND_SEL.click);
+        if (m && (!step.tag || m.tagName.toLowerCase() === step.tag)) return m;
+      }
     }
     await sleep(150);
   }
@@ -863,6 +868,8 @@ async function resolveStep(step, timeout, usePoint = true) {
    machine, or hosted Jev), the background worker asks it (see bg.js, AI_DECIDE).
    ============================================================ */
 const HEAL_MIN_CONF = 0.6;   // below this we fail the step as before
+const AI_MIN_CONF = 0.5;     // the model's own bar: Laya/Jev are not calibrated for this task, so
+const AI_MIN_MARGIN = 2;     // also demand the winner beats the runner-up (or "none") by 2x
 const HEAL_SKIP_MODEL = 0.85;  // local answer this sure never needs the network
 const HEAL_MAX_CANDS = 30;
 const CAND_SEL = {
@@ -896,16 +903,32 @@ function stepHints(step) {
   return h;
 }
 
+// A renamed button is still a button: only controls of the same kind are candidates.
+function kindOf(tag, type, role) {
+  if (tag === 'button' || role === 'button') return 'button';
+  if (tag === 'input') {
+    if (['button', 'submit', 'reset'].includes(type)) return 'button';
+    if (['checkbox', 'radio'].includes(type)) return type;
+    return 'text';
+  }
+  if (tag === 'textarea') return 'text';
+  return tag;
+}
+
 function describeEl(el) {
+  const tag = el.tagName.toLowerCase();
+  let label = labelFor(el);
+  if (label === tag) label = normText(el).slice(0, 40); // labelFor fell back to the tag name
   return {
-    tag: el.tagName.toLowerCase(),
-    label: labelFor(el),
+    tag,
+    label,
     text: normText(el).slice(0, 60),
     id: el.id || '',
     name: el.getAttribute('name') || '',
     placeholder: el.getAttribute('placeholder') || '',
     aria: el.getAttribute('aria-label') || '',
     type: el.type || '',
+    kind: kindOf(tag, (el.type || '').toLowerCase(), el.getAttribute('role')),
   };
 }
 
@@ -923,6 +946,7 @@ function localScore(step, h, d) {
   if (h.placeholder && h.placeholder === d.placeholder) s += 0.15;
   if (h.aria && h.aria === d.aria) s += 0.15;
   if (step.tag && step.tag === d.tag) s += 0.1;
+  if (d.dist != null) s += d.dist < 80 ? 0.15 : d.dist < 200 ? 0.07 : 0;
   if (step.inputType && (step.inputType === d.type || (step.inputType === 'textarea' && d.tag === 'textarea'))) s += 0.1;
   return Math.min(1, s);
 }
@@ -947,12 +971,14 @@ async function askModel(step, top) {
     if (c.d.id) bits.push(`id=${c.d.id}`);
     if (c.d.name) bits.push(`name=${c.d.name}`);
     if (c.d.type) bits.push(`type=${c.d.type}`);
+    if (c.d.dist != null && c.d.dist < 80) bits.push('at the same spot on the page as the original');
     criteria['c' + (i + 1)] = bits.join(' ');
   });
   criteria.none = 'None of these is the same control';
   const rec = [`${step.type} on a ${step.tag || step.inputType || 'field'}`];
   if (step.label) rec.push(`labelled "${step.label}"`);
   if (step.text) rec.push(`with text "${step.text}"`);
+  if (step.inputType) rec.push(`type=${step.inputType}`);
   const h = stepHints(step);
   if (h.id) rec.push(`id=${h.id}`);
   if (h.name) rec.push(`name=${h.name}`);
@@ -971,9 +997,11 @@ async function askModel(step, top) {
   const m = /^c(\d+)$/.exec(a.choice);
   const cand = m && top[+m[1] - 1];
   if (!cand) return null;
-  const p = a.probabilities && !Array.isArray(a.probabilities) ? a.probabilities[a.choice] : null;
-  const conf = typeof p === 'number' ? p : (typeof a.confidence === 'number' ? a.confidence : 0);
-  return { el: cand.el, conf, source: 'model' };
+  const probs = a.probabilities && !Array.isArray(a.probabilities) ? a.probabilities : null;
+  const p = probs ? probs[a.choice] : null;
+  if (typeof p !== 'number') return null; // without the distribution we cannot judge the margin
+  const runnerUp = Math.max(0, ...Object.entries(probs).filter(([k, v]) => k !== a.choice && typeof v === 'number').map(([, v]) => v));
+  return { el: cand.el, conf: p, margin: runnerUp > 0 ? p / runnerUp : Infinity, source: 'model' };
 }
 
 async function healStep(step) {
@@ -982,12 +1010,23 @@ async function healStep(step) {
   const els = [...document.querySelectorAll(sel)].filter(e => isVisible(e) && !host.contains(e));
   if (!els.length) return null;
   const h = stepHints(step);
-  const scored = els.map(el => { const d = describeEl(el); return { el, d, s: localScore(step, h, d) }; });
+  const wantKind = kindOf(step.tag || (step.type === 'fill' ? 'input' : step.type === 'select' ? 'select' : ''), String(step.inputType || '').toLowerCase(), null);
+  const scored = els.map(el => {
+    const d = describeEl(el);
+    if (step.type === 'click' && step.x != null) {
+      const r = el.getBoundingClientRect();
+      d.dist = Math.hypot(r.left + r.width / 2 - step.x, r.top + r.height / 2 - step.y);
+    }
+    return { el, d, s: localScore(step, h, d) };
+  })
+    .filter(c => c.d.kind === wantKind) // a renamed button is still a button
+    .filter(c => c.d.label || c.d.id || c.d.name || c.d.placeholder || c.d.aria); // nothing to tell it apart by
+  if (!scored.length) return null;
   const local = rankLocal(scored);
   if (local && local.conf >= HEAL_SKIP_MODEL) return local;
   const top = scored.slice().sort((a, b) => b.s - a.s).slice(0, HEAL_MAX_CANDS);
   const ai = await askModel(step, top);
-  if (ai && ai.conf >= HEAL_MIN_CONF) return ai;
+  if (ai && ai.conf >= AI_MIN_CONF && ai.margin >= AI_MIN_MARGIN) return ai;
   return local && local.conf >= HEAL_MIN_CONF ? local : null;
 }
 
@@ -1057,6 +1096,7 @@ function onClickCap(e) {
     selectors: buildSelectors(a),
     label: labelFor(a),
     tag: a.tagName.toLowerCase(),
+    inputType: (tag === 'BUTTON' || tag === 'INPUT') ? (a.type || null) : null,
     text: normText(a).slice(0, 60) || null,
     x: Math.round(e.clientX), y: Math.round(e.clientY),
   });

@@ -292,12 +292,12 @@ async function setTheme(t) {
 }
 
 const AI_HOSTS = {
-  laya: 'http://127.0.0.1:8000/*',
+  laya: 'http://127.0.0.1:8765/*',
   typesafe: 'https://api.typesafe.ai/*',
   vercel: 'https://ai-gateway.vercel.sh/*',
 };
 const AI_NOTES = {
-  laya: 'Start it once with: pip install "laya[serve]" then laya-serve. Nothing leaves your computer.',
+  laya: 'Start it once: pip install laya, then python3 scripts/laya_server.py. Nothing leaves your computer.',
   typesafe: 'Sends labels of nearby buttons and fields (never typed values) to TypeSafe.',
   vercel: 'Sends labels of nearby buttons and fields (never typed values) to Vercel.',
 };

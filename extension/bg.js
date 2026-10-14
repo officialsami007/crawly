@@ -67,8 +67,8 @@ chrome.permissions.onRemoved.addListener(perms => {
 // host permission the popup requests when the switch is turned on. Any problem
 // resolves to { ok: false } so the caller falls back to its local answer.
 const AI_ENDPOINTS = {
-  // free, open weights, runs on this machine: pip install "laya[serve]" && laya-serve
-  laya: { url: 'http://127.0.0.1:8000/v1/systemone', model: null, keyed: false, timeout: 8000, wrapState: true },
+  // free, open weights, runs on this machine: pip install laya && python3 scripts/laya_server.py
+  laya: { url: 'http://127.0.0.1:8765/v1/systemone', model: null, keyed: false, timeout: 8000, wrapState: true },
   typesafe: { url: 'https://api.typesafe.ai/v1/systemone', model: 'jev-latest', keyed: true, timeout: 3000 },
   vercel: { url: 'https://ai-gateway.vercel.sh/typesafe/v1/systemone', model: 'typesafe-ai/jev', keyed: true, timeout: 3000 },
 };

@@ -110,9 +110,9 @@ Two spider suits in the popup header: **NOIR**, the classic black spider, and **
 
 When a recorded element is gone (renamed button, changed id), the spider does not give up right away. It scores the visible candidates against the recorded step (label, text, id, name, placeholder, tag) and, if one is a confident match, carries on with "Button changed, but I'm 87% sure this is it!". This works fully offline.
 
-For the cases the local scorer is unsure about you can switch on **Ask an AI model when a step breaks** in the popup. Crawly then asks one typed question ("which candidate is the same control?") and uses the answer when the model's confidence is 60% or higher. Pick the model:
+For the cases the local scorer is unsure about you can switch on **Ask an AI model when a step breaks** in the popup. Crawly then asks one typed question ("which candidate is the same control?") and uses the answer only when the model is at least 50% sure and clearly prefers that candidate over every other option (2x the runner-up). Candidates must be the same kind of control: a renamed button can only become another button. Pick the model:
 
-- **Laya** (free, open weights, Apache 2.0, runs on your computer). Start it once with `pip install "laya[serve]"` then `laya-serve` (it listens on `127.0.0.1:8000`; the first request downloads about 800 MB of weights). Nothing leaves your machine.
+- **Laya** (free, open weights, Apache 2.0, runs on your computer). Start it once with `pip install laya` then `python3 scripts/laya_server.py` (it listens on `127.0.0.1:8765`; the first request downloads about 800 MB of weights). Nothing leaves your machine.
 - **Jev** (hosted by TypeSafe, directly or through Vercel AI Gateway). Bring your own API key; it is stored in extension storage and only used from the background worker.
 
 Only the labels and attributes of candidate elements are sent, never typed values. Any error or timeout falls back to the local answer.
