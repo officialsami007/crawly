@@ -291,7 +291,80 @@ async function setTheme(t) {
   try { await send('SET_THEME', { theme: t }); } catch (e) {}
 }
 
+const AI_HOSTS = {
+  laya: 'http://127.0.0.1:8765/*',
+  typesafe: 'https://api.typesafe.ai/*',
+  vercel: 'https://ai-gateway.vercel.sh/*',
+};
+const AI_NOTES = {
+  laya: 'Start it once: pip install laya, then python3 scripts/laya_server.py. Nothing leaves your computer.',
+  typesafe: 'Sends labels of nearby buttons and fields (never typed values) to TypeSafe.',
+  vercel: 'Sends labels of nearby buttons and fields (never typed values) to Vercel.',
+};
+
+async function renderAI() {
+  const { settings = {} } = await chrome.storage.local.get('settings');
+  const ai = settings.ai || {};
+  const ep = ai.endpoint || 'laya';
+  $('aiOn').checked = !!ai.enabled;
+  $('aiBox').hidden = !ai.enabled;
+  $('aiEndpoint').value = ep;
+  $('aiKey').hidden = ep === 'laya';
+  $('aiKey').value = ai.key || '';
+  $('aiNote').textContent = AI_NOTES[ep];
+}
+
+async function saveAI(changes) {
+  const { settings = {} } = await chrome.storage.local.get('settings');
+  settings.ai = Object.assign({ enabled: false, endpoint: 'laya', key: '' }, settings.ai, changes);
+  await chrome.storage.local.set({ settings });
+  return settings.ai;
+}
+
+const GROQ_HOST = 'https://api.groq.com/*';
+
+async function renderGroq() {
+  const { settings = {} } = await chrome.storage.local.get('settings');
+  $('groqKey').value = (settings.groq && settings.groq.key) || '';
+}
+
+async function saveGroqKey(key) {
+  const { settings = {} } = await chrome.storage.local.get('settings');
+  settings.groq = Object.assign({}, settings.groq, { key });
+  await chrome.storage.local.set({ settings });
+}
+
 async function init() {
+  $('groqKey').addEventListener('change', e => saveGroqKey(e.target.value.trim()));
+  $('aiTestBtn').addEventListener('click', async () => {
+    const key = $('groqKey').value.trim();
+    if (!key) { toast('Paste your Groq API key first.'); return; }
+    // permissions.request has to run straight from the click, before any await
+    const granted = await chrome.permissions.request({ origins: [GROQ_HOST] });
+    if (!granted) { toast('Crawly needs permission to reach Groq.'); return; }
+    await saveGroqKey(key);
+    const r = await send('AI_TEST').catch(() => null);
+    if (r && r.ok) window.close();
+    else toast(r && r.reason === 'busy' ? 'The spider is busy.' : 'Could not start. Reload the tab and try again.');
+  });
+  $('aiOn').addEventListener('change', async e => {
+    const on = e.target.checked;
+    if (on) {
+      // permissions.request has to run straight from the click, before any await
+      const granted = await chrome.permissions.request({ origins: [AI_HOSTS[$('aiEndpoint').value]] });
+      if (!granted) { e.target.checked = false; toast('Crawly needs permission to reach the model.'); return; }
+    }
+    await saveAI({ enabled: on });
+    renderAI();
+  });
+  $('aiEndpoint').addEventListener('change', async e => {
+    const granted = await chrome.permissions.request({ origins: [AI_HOSTS[e.target.value]] });
+    if (!granted) { await renderAI(); toast('Crawly needs permission to reach that host.'); return; }
+    await saveAI({ endpoint: e.target.value });
+    renderAI();
+  });
+  $('aiKey').addEventListener('change', e => saveAI({ key: e.target.value.trim() }));
+
   $('ver').textContent = 'v' + chrome.runtime.getManifest().version;
   $('tNoir').addEventListener('click', () => setTheme('noir'));
   $('tHero').addEventListener('click', () => setTheme('hero'));
@@ -338,6 +411,8 @@ async function init() {
 
   tab = await getTab();
   renderTheme();
+  renderAI();
+  renderGroq();
   if (!tab || !tab.id) { dead('No tab found.', false); return; }
   const ok = await refreshState();
   if (ok) renderLists();

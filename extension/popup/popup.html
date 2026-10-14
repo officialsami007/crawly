@@ -48,6 +48,25 @@
     </div>
   </section>
 
+  <section class="card" id="aiCard">
+    <label class="roam"><input type="checkbox" id="aiOn"><span>Ask an AI model when a step breaks</span></label>
+    <div id="aiBox" hidden>
+      <select id="aiEndpoint">
+        <option value="laya">Laya (free, runs on this computer)</option>
+        <option value="typesafe">Jev via TypeSafe API</option>
+        <option value="vercel">Jev via Vercel AI Gateway</option>
+      </select>
+      <input id="aiKey" type="password" autocomplete="off" spellcheck="false" placeholder="API key" hidden>
+      <p class="ainote" id="aiNote"></p>
+    </div>
+  </section>
+
+  <section class="card" id="groqCard">
+    <button id="aiTestBtn" class="btn big">AI TEST THIS PAGE</button>
+    <input id="groqKey" type="password" autocomplete="off" spellcheck="false" placeholder="Groq API key">
+    <p class="ainote">No recording needed. Groq reads this page's buttons and fields (labels only, never what is typed) and writes a test plan; the spider runs it, and the AI model above checks the result. Skips delete, pay and log-out buttons.</p>
+  </section>
+
   <section class="crawls">
     <h2>ON THIS SITE</h2>
     <div id="mine" class="list"></div>

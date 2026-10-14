@@ -38,10 +38,11 @@ header {
 main {
   padding: 10px 14px 4px; flex: 1; min-height: 0;
   display: flex; flex-direction: column;
+  overflow-y: auto; /* the cards no longer fit in 560px, so the popup scrolls */
 }
-section { margin-bottom: 12px; }
+section { margin-bottom: 12px; flex: none; }
 section.crawls {
-  flex: 1; min-height: 0; margin-bottom: 0;
+  flex: 1 0 auto; min-height: 150px; margin-bottom: 0;
   display: flex; flex-direction: column;
 }
 section.crawls h2 { flex: none; }
@@ -149,3 +150,10 @@ footer a:hover { text-decoration: underline; }
 footer a.ftr-privacy { font-size: 12px; letter-spacing: 1px; color: #555; margin-left: -2px; }
 footer span { font-size: 11px; color: #555; margin-left: auto; }
 .empty { font-size: 12px; color: #555; padding: 2px 2px 6px; }
+
+#aiBox { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+#aiBox select, #aiBox input { font: inherit; padding: 6px 8px; border: 2px solid #111; border-radius: 6px; background: #fff; color: #111; }
+.ainote { margin: 0; font-size: 11px; opacity: .7; }
+#aiBox[hidden] { display: none; }
+#groqCard { display: flex; flex-direction: column; gap: 6px; }
+#groqKey { font: inherit; padding: 6px 8px; border: 2px solid #111; border-radius: 6px; background: #fff; color: #111; }

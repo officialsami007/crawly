@@ -106,9 +106,31 @@ Flip **AUTO** on a crawl and it will run by itself whenever a matching page load
 
 Two spider suits in the popup header: **NOIR**, the classic black spider, and **HERO**, the red and blue one. You know the one.
 
+## Self-healing and Jev
+
+When a recorded element is gone (renamed button, changed id), the spider does not give up right away. It scores the visible candidates against the recorded step (label, text, id, name, placeholder, tag) and, if one is a confident match, carries on with "Button changed, but I'm 87% sure this is it!". This works fully offline.
+
+For the cases the local scorer is unsure about you can switch on **Ask an AI model when a step breaks** in the popup. Crawly then asks one typed question ("which candidate is the same control?") and uses the answer only when the model is at least 50% sure and clearly prefers that candidate over every other option (2x the runner-up). Candidates must be the same kind of control: a renamed button can only become another button. Pick the model:
+
+- **Laya** (free, open weights, Apache 2.0, runs on your computer). Start it once with `pip install laya` then `python3 scripts/laya_server.py` (it listens on `127.0.0.1:8765`; the first request downloads about 800 MB of weights). Nothing leaves your machine.
+- **Jev** (hosted by TypeSafe, directly or through Vercel AI Gateway). Bring your own API key; it is stored in extension storage and only used from the background worker.
+
+Only the labels and attributes of candidate elements are sent, never typed values. Any error or timeout falls back to the local answer.
+
+## AI test: no recording needed
+
+Click **AI TEST THIS PAGE** in the popup and the spider tests the page it is on without a recording:
+
+1. It lists the page's buttons and fields (labels and attributes only, never what is in them) and sends that list to [Groq](https://console.groq.com/keys), using your own API key. Groq answers with a JSON test plan that points at those controls by number.
+2. The spider runs the first batch of steps with the usual walk-and-type show. A batch always ends at a button or link, because that may open another screen.
+3. It re-reads the page and asks Groq what to test next, so wizards, dialogs and multi-page flows are followed, up to 20 batches or 60 steps.
+4. The model chosen in the popup (Laya by default) classifies every message that appeared while testing (success, error, or neither). An error message fails the run. After a submit-like button, a confirmation message or a new screen is expected, or the run fails.
+
+Everything it did is saved as a normal crawl ("AI test: ..."), so you can replay it later without Groq. Delete, pay, log-out and similar buttons are skipped, as are links that leave the site. The Groq key is stored in extension storage and only used from the background worker. You need a model switched on above for the message checks; without one the spider still runs the plan but cannot judge the result.
+
 ## Privacy
 
-- Everything runs locally in your browser. No telemetry, no network requests.
+- Everything runs locally in your browser. No telemetry. The only network requests Crawly can ever make are the optional model call above (to `127.0.0.1` for Laya) and, if you press AI TEST, the page description sent to Groq. Both are off until you turn them on.
 - Recordings are kept in `chrome.storage.local`, scoped to the extension.
 - Values (including anything typed into password fields) are stored in plain text. Use test credentials.
 
