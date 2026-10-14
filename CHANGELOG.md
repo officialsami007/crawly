@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   Off by default; pick Laya (free, runs locally via `scripts/laya_server.py`) or Jev
   (hosted, bring your own API key) in the popup.
 
+- **AI TEST THIS PAGE**: no recording needed. Groq writes a JSON test plan from
+  the page's controls, the spider runs it batch by batch (re-reading the page
+  after every button or link), and Laya (or Jev) classifies the messages that
+  appear. Errors fail the run; submit-like buttons must be followed by a
+  confirmation or a new screen. The result is saved as a normal crawl.
+
 ### Changed
 
 - A missing click target is no longer replaced by whatever sits at the recorded

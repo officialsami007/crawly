@@ -810,7 +810,7 @@ function labelFor(el) {
   }
   if (!lab && (t === 'button' || t === 'a' || el.getAttribute('role') === 'button')) lab = normText(el);
   if (!lab && t === 'input' && (el.type === 'submit' || el.type === 'button')) lab = el.value;
-  if (!lab) lab = el.getAttribute('name') || el.id || t;
+  if (!lab) lab = el.getAttribute('name') || el.id || el.getAttribute('data-testid') || t;
   lab = String(lab).replace(/\s+/g, ' ').trim();
   return lab.length > 42 ? lab.slice(0, 40) + '..' : (lab || t);
 }
@@ -1028,6 +1028,285 @@ async function healStep(step) {
   const ai = await askModel(step, top);
   if (ai && ai.conf >= AI_MIN_CONF && ai.margin >= AI_MIN_MARGIN) return ai;
   return local && local.conf >= HEAL_MIN_CONF ? local : null;
+}
+
+/* ============================================================
+   AI test: Groq writes the test plan, Laya makes the quick calls
+   No recording needed. The page's controls are listed with numeric ids
+   (labels and attributes only, never what is typed in them), Groq answers
+   with a JSON plan that points at those ids, and the plan becomes ordinary
+   crawl steps for the normal runner. After each click and at the end, Laya
+   answers yes/no questions about what the page shows. See bg.js, GROQ_PLAN.
+   ============================================================ */
+const SNAP_SEL = 'a[href], button, input, select, textarea, [role="button"], summary';
+const SNAP_MAX = 60;
+const SKIP_INPUT_TYPES = ['hidden', 'file', 'range', 'color', 'image'];
+// the plan is told to avoid these; this is the backstop if it does not listen
+const RISKY = /\b(delete|remove|destroy|erase|wipe|log\s?out|sign\s?out|pay|purchase|buy|checkout|order now|unsubscribe|deactivate|cancel (my )?(subscription|account)|reset)\b/i;
+const SUCCESS_BAR = 0.6;     // Laya this sure a message confirms success: it counts as a confirmation
+const ERROR_BAR = 0.35;      // "error" its likeliest kind at this probability or more: the run fails
+// ...but only text that sits in an alert-like element gets those bars; plain text on the
+// page (a form heading, a label) has to be much clearer before it counts either way
+const SUCCESS_BAR_PLAIN = 0.8, ERROR_BAR_PLAIN = 0.7;
+const ALERTY = /error|invalid|danger|fail|warn|alert|toast|banner|notice|message|success|flash|snack|status/i;
+const MSG_KINDS = {
+  success: 'confirms that the user action worked or completed',
+  error: 'reports an error, failure, invalid input or something wrong',
+  other: 'neither: just a label, heading, instruction or neutral text',
+};
+
+function snapshotPage() {
+  const items = [], els = [];
+  for (const el of document.querySelectorAll(SNAP_SEL)) {
+    if (items.length >= SNAP_MAX) break;
+    if ((host && host.contains(el)) || !isVisible(el)) continue;
+    const tag = el.tagName.toLowerCase();
+    const type = (el.type || '').toLowerCase();
+    if (tag === 'input' && SKIP_INPUT_TYPES.includes(type)) continue;
+    let kind = kindOf(tag, type, el.getAttribute('role'));
+    let href = null;
+    if (kind === 'a') {
+      try { const u = new URL(el.href, location.href); if (u.origin === location.origin) href = u.pathname + u.search; } catch (e) {}
+      if (!href) continue; // links that leave the site are never followed
+      kind = 'link';
+    } else if (kind === 'summary') kind = 'button';
+    const it = { id: items.length, kind, label: labelFor(el) };
+    if (kind === 'text') it.inputType = tag === 'textarea' ? 'textarea' : (type || 'text');
+    if (el.getAttribute('name')) it.name = el.getAttribute('name');
+    if (el.getAttribute('placeholder')) it.placeholder = el.getAttribute('placeholder');
+    if (el.required) it.required = true;
+    if (isDisabled(el)) it.disabled = true;
+    if (tag === 'select') it.options = [...el.options].slice(0, 8).map(o => o.value || normText(o)).filter(Boolean);
+    if (href) it.href = href;
+    items.push(it); els.push(el);
+  }
+  const headings = [...document.querySelectorAll('h1, h2')].filter(isVisible).slice(0, 5).map(h => normText(h).slice(0, 80));
+  return { snap: { title: document.title.slice(0, 80), path: location.pathname, headings, items }, els };
+}
+
+// Turn the plan's JSON into recorder-style steps, checking every target against the real page.
+function planToSteps(plan, snap, els) {
+  const steps = [], skipped = [];
+  for (const ps of (Array.isArray(plan.steps) ? plan.steps : []).slice(0, 25)) {
+    const i = Number(ps && ps.target);
+    const it = snap.items[i], el = els[i];
+    const act = String((ps && ps.action) || '').toLowerCase();
+    if (!it || !el) { skipped.push('unknown element'); continue; }
+    if (it.disabled) { skipped.push(`"${it.label}" is disabled`); continue; }
+    const base = { selectors: buildSelectors(el), label: it.label };
+    if (act === 'fill' && it.kind === 'text') {
+      steps.push(Object.assign({ type: 'fill', value: String(ps.value == null ? '' : ps.value).slice(0, 200), inputType: it.inputType }, base));
+    } else if (act === 'select' && it.kind === 'select') {
+      const v = String(ps.value);
+      if (!it.options.includes(v)) { skipped.push(`"${v}" is not an option of "${it.label}"`); continue; }
+      steps.push(Object.assign({ type: 'select', value: v }, base));
+    } else if ((act === 'click' || act === 'check') && ['button', 'link', 'checkbox', 'radio'].includes(it.kind)) {
+      if (RISKY.test(it.label)) { skipped.push(`skipped risky "${it.label}"`); continue; }
+      const r = el.getBoundingClientRect();
+      const tag = el.tagName;
+      steps.push(Object.assign({
+        type: 'click',
+        tag: tag.toLowerCase(),
+        inputType: (tag === 'BUTTON' || tag === 'INPUT') ? (el.type || null) : null,
+        text: normText(el).slice(0, 60) || null,
+        x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2),
+      }, base));
+      // a button or link may open another screen, so the plan stops here and is rebuilt
+      // from what the page really shows next (ticking a box does not count)
+      if (it.kind === 'button' || it.kind === 'link') break;
+    } else skipped.push(`cannot ${act || '?'} "${it.label}"`);
+  }
+  const expectConfirmation = expectsAfter(plan, steps);
+  return { steps, skipped, expectConfirmation };
+}
+
+// Text that shows up while a generated test runs (banners, toasts, validation messages),
+// caught even if it disappears again a few seconds later.
+let watch = null;
+function startWatch(auto) {
+  stopWatch();
+  const seen = [], sem = {};
+  const add = el => {
+    if (!el || el.nodeType !== 1 || el === host || (host && host.contains(el))) return;
+    if (el.querySelector('input, button, select, textarea, a')) return; // a container, not a message
+    const t = normText(el).slice(0, 160);
+    if (t && seen.length < 20 && !seen.includes(t)) {
+      seen.push(t);
+      sem[t] = !!(el.closest('[role="alert"], [role="status"], [aria-live]') || ALERTY.test(`${el.id} ${typeof el.className === 'string' ? el.className : ''}`));
+    }
+  };
+  const obs = new MutationObserver(ms => {
+    for (const m of ms) {
+      if (m.type === 'childList') m.addedNodes.forEach(n => add(n.nodeType === 3 ? n.parentElement : n));
+      else if (m.type === 'attributes' && m.target.nodeType === 1 && isVisible(m.target)) add(m.target);
+    }
+  });
+  obs.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style', 'hidden', 'aria-hidden'] });
+  watch = { seen, sem, obs, auto };
+}
+function stopWatch() { if (watch) { watch.obs.disconnect(); watch = null; } }
+
+// What a reader of the page would see: what just appeared first, then alert-like text, then the visible text.
+function pageDigest() {
+  const parts = [];
+  document.querySelectorAll('[role="alert"], [role="status"], [aria-live], [class*="error"], [class*="success"], [class*="alert"], [class*="toast"], [class*="banner"]').forEach(el => {
+    if ((host && host.contains(el)) || !isVisible(el)) return;
+    const t = normText(el).slice(0, 200);
+    if (t && !parts.includes(t)) parts.push(t);
+  });
+  const body = (document.body.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 500);
+  const appeared = watch ? (watch.seen.join(' | ') || 'nothing') : 'unknown';
+  return `Page "${document.title}" (${location.pathname}). New text that appeared while testing: ${appeared}. Messages on screen now: ${parts.join(' | ') || 'none'}. Visible text: ${body}`.slice(0, 1400);
+}
+
+// Ask Laya (or Jev) what kind of message a piece of text is. null if no model is switched on.
+async function classifyMessage(text) {
+  let res;
+  try {
+    res = await chrome.runtime.sendMessage({
+      cmd: 'AI_DECIDE',
+      state: text,
+      questions: { kind: { type: 'choice', instructions: 'What kind of message is this text, as shown to a user of a web app?', criteria: MSG_KINDS } },
+    });
+  } catch (e) { return null; }
+  const a = res && res.ok && res.answers && res.answers.kind;
+  if (!a || !a.probabilities || typeof a.choice !== 'string') return null;
+  return { text, kind: a.choice, p: a.probabilities[a.choice] };
+}
+
+// Judge the messages that appeared since the last call. Returns { error, success, judged }.
+async function judgeNewMessages() {
+  const out = { error: null, success: null, judged: false, texts: [] };
+  if (!watch) return out;
+  // the app echoing back what this test typed (a review step, a table row) is not the app talking
+  const typed = ((watch.auto && watch.auto.steps) || []).filter(x => x.type === 'fill' && String(x.value || '').length >= 4).map(x => String(x.value).toLowerCase());
+  const echo = t => { const l = t.toLowerCase(); return typed.some(v => l.includes(v) || (l.length >= 12 && v.includes(l))); };
+  const fresh = watch.seen.slice(watch.judged || 0).filter(t => t.length >= 3 && !echo(t)).slice(0, 6);
+  watch.judged = watch.seen.length;
+  if (!fresh.length) return out;
+  out.texts = fresh;
+  const verdicts = await Promise.all(fresh.map(classifyMessage));
+  for (const v of verdicts) {
+    if (!v) continue;
+    out.judged = true;
+    const alerty = !!watch.sem[v.text];
+    if (v.kind === 'error' && v.p >= (alerty ? ERROR_BAR : ERROR_BAR_PLAIN) && (!out.error || v.p > out.error.p)) out.error = v;
+    if (v.kind === 'success' && v.p >= (alerty ? SUCCESS_BAR : SUCCESS_BAR_PLAIN) && (!out.success || v.p > out.success.p)) out.success = v;
+  }
+  return out;
+}
+
+const AI_SESS_KEY = '__crawly_aisess';
+// the visible headings: single-page apps change these when they move to another screen
+const headSig = () => [...document.querySelectorAll('h1, h2, h3')].filter(h => isVisible(h) && !(host && host.contains(h))).slice(0, 6).map(h => normText(h).slice(0, 60)).join('|');
+const AI_MAX_ROUNDS = 20, AI_MAX_STEPS = 60, AI_ROUND_STEPS = 10;
+// a confirmation is only owed after a batch that ends by pressing something (not by ticking a box)
+const expectsAfter = (plan, steps) => {
+  const last = steps[steps.length - 1];
+  return plan.expects_confirmation === true && !!last && last.type === 'click' && !['checkbox', 'radio'].includes(last.inputType);
+};
+const briefStep = st => `${st.type} "${st.label || st.text || st.tag}"${st.value ? ' = ' + String(st.value).slice(0, 30) : ''}`;
+
+async function askGroq(snap, sess) {
+  let res;
+  try {
+    res = await chrome.runtime.sendMessage({
+      cmd: 'GROQ_PLAN',
+      snapshot: snap,
+      history: sess ? sess.history.slice(-30) : [],
+      messages: sess ? sess.messages.slice(-8) : [],
+    });
+  } catch (e) { res = null; }
+  return res || { ok: false, reason: 'no-reply' };
+}
+
+// After a batch of steps: look at the page again, ask Groq what to test next, and append it.
+async function planNextRound(auto, sess) {
+  const { snap, els } = snapshotPage();
+  if (!snap.items.length) return false;
+  bubble('Asking Groq what to test next...', 30000);
+  const res = await askGroq(snap, sess);
+  if (!res.ok) { bubble(`Groq did not answer (${res.reason}), so I stop here.`, 2200); await sleep(2000); return false; }
+  const plan = res.plan || {};
+  if (plan.done === true) { ssSet(AI_SESS_KEY, sess); return false; }
+  const room = AI_MAX_STEPS - sess.total;
+  const { steps } = planToSteps(plan, snap, els);
+  const fresh = steps.slice(0, Math.min(AI_ROUND_STEPS, room));
+  const sig = fresh.map(briefStep).join('|');
+  if (!fresh.length || sig === sess.lastSig) { ssSet(AI_SESS_KEY, sess); return false; } // nothing new: we are going round in circles
+  sess.lastSig = sig;
+  sess.expects = expectsAfter(plan, fresh); // judged on the latest batch only
+  sess.round++;
+  sess.roundSuccess = false;
+  sess.roundPath = location.pathname;
+  sess.roundHead = headSig();
+  sess.total += fresh.length;
+  sess.history.push(...fresh.map(briefStep));
+  ssSet(AI_SESS_KEY, sess);
+  auto.steps.push(...fresh);
+  const cur = await STORE.get('automations');
+  const list = cur.automations || [];
+  const k = list.findIndex(a => a.id === auto.id);
+  if (k >= 0) { list[k].steps = auto.steps; await STORE.set({ automations: list }); }
+  return true;
+}
+
+// End of a batch of a generated test: judge what appeared, then decide whether to go on.
+// Returns { fail: reason } | { more: true } | { done: true, sawSuccess }.
+async function aiRoundEnd(auto) {
+  const sess = ssGet(AI_SESS_KEY);
+  const j = await judgeNewMessages();
+  if (sess && sess.autoId === auto.id) {
+    if (!sess.paths.includes(location.pathname)) sess.paths.push(location.pathname);
+    if (j.success) { sess.sawSuccess = { text: j.success.text, p: j.success.p }; sess.roundSuccess = true; }
+    sess.messages.push(...j.texts.map(t => t.slice(0, 80)));
+    ssSet(AI_SESS_KEY, sess);
+  }
+  if (j.error) return { fail: `The page says "${j.error.text.slice(0, 50)}" (Laya: ${Math.round(j.error.p * 100)}% error)` };
+  if (!sess || sess.autoId !== auto.id) return { done: true, sawSuccess: j.success };
+  // each batch has to earn its own confirmation: a success elsewhere does not excuse it
+  if (sess.expects && !sess.roundSuccess && location.pathname === sess.roundPath && headSig() === sess.roundHead) {
+    return { fail: 'This batch should have confirmed something, but no confirmation message or new page appeared' };
+  }
+  if (sess.round < AI_MAX_ROUNDS && sess.total < AI_MAX_STEPS && await planNextRound(auto, sess)) return { more: true };
+  ssDel(AI_SESS_KEY);
+  return { done: true, sawSuccess: sess.sawSuccess };
+}
+
+async function aiTest() {
+  if (running || rec) return { ok: false, reason: 'busy' };
+  bubble('Reading the page...', 1500);
+  const { snap, els } = snapshotPage();
+  if (!snap.items.length) { bubble('I see nothing to test on this page!', 2500); return { ok: false, reason: 'empty' }; }
+  bubble('Asking Groq for a test plan...', 30000);
+  const res = await askGroq(snap, null);
+  if (!res.ok) {
+    const why = res.reason === 'off' ? 'Add your Groq key in the popup first.'
+      : res.reason === 'http-401' ? 'Groq rejected the API key.'
+      : `Groq did not answer (${res.reason}).`;
+    bubble(why, 3500);
+    return { ok: false, reason: res.reason };
+  }
+  const { steps, skipped, expectConfirmation } = planToSteps(res.plan || {}, snap, els);
+  if (!steps.length) { bubble('Groq gave me no steps I could use.', 3000); return { ok: false, reason: 'no-steps', skipped }; }
+  const auto = {
+    id: 'a_' + Math.random().toString(36).slice(2, 10),
+    name: ('AI test: ' + (res.plan && res.plan.name || document.title || location.pathname)).slice(0, 60),
+    origin: location.origin,
+    pathPrefix: location.pathname,
+    enabled: true,
+    generated: true,
+    createdAt: Date.now(),
+    steps, expectConfirmation,
+  };
+  const cur = await STORE.get('automations');
+  await STORE.set({ automations: (cur.automations || []).concat(auto) });
+  ssSet(AI_SESS_KEY, {
+    autoId: auto.id, round: 1, total: steps.length, history: steps.map(briefStep), messages: [],
+    paths: [location.pathname], sawSuccess: null, roundSuccess: false, roundPath: location.pathname, roundHead: headSig(), expects: expectConfirmation, lastSig: steps.map(briefStep).join('|'),
+  });
+  runAutomation(auto);
+  return { ok: true, started: true, steps: steps.length, expectConfirmation, skipped };
 }
 
 /* ============================================================
@@ -1312,6 +1591,7 @@ function saveRun(autoId, next) { ssSet(RUN_KEY, { id: autoId, next, t: Date.now(
 
 async function failRun(st, i, total, msg) {
   ssDel(RUN_KEY);
+  ssDel(AI_SESS_KEY);
   const at = st && st.__rect ? st.__rect : { x: spider.x, y: spider.y - 40 };
   powAt('OMG!', at.x, at.y - 20, false);
   bubble(msg, 2100);
@@ -1328,6 +1608,8 @@ async function runAutomation(auto, startIndex, resumed) {
   if (rec) { bubble('Stop recording before running!', 1500); return { ok: false, reason: 'recording' }; }
   running = true;
   const steps = auto.steps || [];
+  let sawSuccess = null;
+  if (auto.generated) startWatch(auto);
   try {
     await dropIn(W / 2);
     powAt('WHOOSH!', spider.x, spider.y - 46, false);
@@ -1339,7 +1621,9 @@ async function runAutomation(auto, startIndex, resumed) {
       bubble(`Psst, this was recorded on ${auto.pathPrefix}. Trying anyway!`, 2000);
       await sleep(1200);
     }
-    for (let i = startIndex; i < steps.length; i++) {
+    let i = startIndex;
+    for (;;) {
+    for (; i < steps.length; i++) {
       const st = steps[i];
       saveRun(auto.id, i); // if the page unloads mid-step, resume from this step
       if (st.type === 'move') {
@@ -1408,6 +1692,15 @@ async function runAutomation(auto, startIndex, resumed) {
         await sleep(300);
         await hop(ap.x, ap.y); // hop back off so the result shows
         await sleep(160);
+        if (auto.generated) { // Laya's quick look: did that click put an error on screen?
+          await sleep(250);
+          const seen = await judgeNewMessages();
+          if (seen.success) { const sx = ssGet(AI_SESS_KEY); if (sx) { sx.sawSuccess = { text: seen.success.text, p: seen.success.p }; sx.roundSuccess = true; ssSet(AI_SESS_KEY, sx); } }
+          if (seen.error) {
+            await failRun(st, i, steps.length, `The page says "${seen.error.text.slice(0, 50)}" after ${stepName(st)} (Laya: ${Math.round(seen.error.p * 100)}% error)!`);
+            return { ok: false, failedAt: i, reason: 'page-error', message: seen.error.text };
+          }
+        }
       } else if (st.type === 'fill') {
         const perch = perchPoint(r);
         await goTo(perch.x, perch.y);
@@ -1436,6 +1729,21 @@ async function runAutomation(auto, startIndex, resumed) {
       saveRun(auto.id, i + 1);
       await sleep(140);
     }
+    if (!auto.generated) break;
+    const end = await aiRoundEnd(auto);
+    if (end.fail) {
+      ssDel(RUN_KEY); ssDel(AI_SESS_KEY);
+      powAt('BOOM!', W / 2, H * 0.4, true);
+      await sleep(400);
+      bubble(end.fail + '!', 3200);
+      await sleep(3000);
+      return { ok: false, reason: 'check', message: end.fail };
+    }
+    if (end.more) continue; // the plan grew; keep walking
+    sawSuccess = end.sawSuccess;
+    break;
+    }
+    if (sawSuccess) { bubble(`Confirmed: "${sawSuccess.text.slice(0, 50)}" (Laya: ${Math.round(sawSuccess.p * 100)}% success)`, 2200); await sleep(1800); }
     ssDel(RUN_KEY);
     powAt('KPOW!', W / 2, H * 0.32, true);
     await sleep(300);
@@ -1443,6 +1751,7 @@ async function runAutomation(auto, startIndex, resumed) {
     await sleep(2000);
     return { ok: true };
   } finally {
+    stopWatch();
     typing = false;
     try { await ascend(); } catch (e) { hideSpider(); }
     running = false;
@@ -1476,6 +1785,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           spider: visible ? { x: Math.round(spider.x), y: Math.round(spider.y), mode: spider.mode } : null,
         };
       }
+      case 'AI_TEST': return aiTest();
       case 'START_RECORD': return startRecording();
       case 'STOP_RECORD': return stopRecording(msg.name, false);
       case 'CANCEL_RECORD': return stopRecording(null, true);

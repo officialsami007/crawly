@@ -321,7 +321,32 @@ async function saveAI(changes) {
   return settings.ai;
 }
 
+const GROQ_HOST = 'https://api.groq.com/*';
+
+async function renderGroq() {
+  const { settings = {} } = await chrome.storage.local.get('settings');
+  $('groqKey').value = (settings.groq && settings.groq.key) || '';
+}
+
+async function saveGroqKey(key) {
+  const { settings = {} } = await chrome.storage.local.get('settings');
+  settings.groq = Object.assign({}, settings.groq, { key });
+  await chrome.storage.local.set({ settings });
+}
+
 async function init() {
+  $('groqKey').addEventListener('change', e => saveGroqKey(e.target.value.trim()));
+  $('aiTestBtn').addEventListener('click', async () => {
+    const key = $('groqKey').value.trim();
+    if (!key) { toast('Paste your Groq API key first.'); return; }
+    // permissions.request has to run straight from the click, before any await
+    const granted = await chrome.permissions.request({ origins: [GROQ_HOST] });
+    if (!granted) { toast('Crawly needs permission to reach Groq.'); return; }
+    await saveGroqKey(key);
+    const r = await send('AI_TEST').catch(() => null);
+    if (r && r.ok) window.close();
+    else toast(r && r.reason === 'busy' ? 'The spider is busy.' : 'Could not start. Reload the tab and try again.');
+  });
   $('aiOn').addEventListener('change', async e => {
     const on = e.target.checked;
     if (on) {
@@ -387,6 +412,7 @@ async function init() {
   tab = await getTab();
   renderTheme();
   renderAI();
+  renderGroq();
   if (!tab || !tab.id) { dead('No tab found.', false); return; }
   const ok = await refreshState();
   if (ok) renderLists();
