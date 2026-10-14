@@ -5,7 +5,7 @@
   "description": "Record and replay UI tests: a comic spider types character-by-character, clicks buttons, yells KPOW when it passes.",
   "homepage_url": "https://crawly.site",
   "permissions": ["storage", "activeTab", "scripting"],
-  "optional_host_permissions": ["*://*/*"],
+  "optional_host_permissions": ["*://*/*", "http://127.0.0.1:8000/*", "https://api.typesafe.ai/*", "https://ai-gateway.vercel.sh/*"],
   "background": { "service_worker": "bg.js" },
   "action": {
     "default_popup": "popup/popup.html",

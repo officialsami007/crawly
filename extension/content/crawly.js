@@ -825,7 +825,7 @@ function isDisabled(el) {
   return !!(el.disabled || el.getAttribute('aria-disabled') === 'true' || el.closest('fieldset[disabled]'));
 }
 
-async function resolveStep(step, timeout) {
+async function resolveStep(step, timeout, usePoint = true) {
   const t0 = performance.now();
   while (performance.now() - t0 < timeout) {
     for (const sel of step.selectors || []) {
@@ -845,13 +845,150 @@ async function resolveStep(step, timeout) {
       const m = [...document.querySelectorAll(step.tag)].find(e => isVisible(e) && normText(e) === step.text);
       if (m) return m;
     }
-    if (step.type === 'click' && step.x != null) {
+    if (usePoint && step.type === 'click' && step.x != null) {
       const m = document.elementFromPoint(clamp(step.x, 0, W - 1), clamp(step.y, 0, H - 1));
       if (m && m !== document.body && m !== document.documentElement && !host.contains(m)) return m;
     }
     await sleep(150);
   }
   return null;
+}
+
+/* ============================================================
+   Self-healing: typed decisions
+   When a recorded element is gone, rank the visible candidates and
+   answer one typed question, "which one is the same control?", with a
+   calibrated confidence. A local scorer answers first and is free and
+   offline. If it is unsure and a model is switched on in the popup (Laya on this
+   machine, or hosted Jev), the background worker asks it (see bg.js, AI_DECIDE).
+   ============================================================ */
+const HEAL_MIN_CONF = 0.6;   // below this we fail the step as before
+const HEAL_SKIP_MODEL = 0.85;  // local answer this sure never needs the network
+const HEAL_MAX_CANDS = 30;
+const CAND_SEL = {
+  click: 'button, a[href], [role="button"], input[type="button"], input[type="submit"], input[type="checkbox"], input[type="radio"], summary, label, [onclick]',
+  fill: 'input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="button"]):not([type="submit"]), textarea',
+  select: 'select',
+};
+
+const toks = s => new Set(String(s || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean));
+function textSim(a, b) {
+  const x = toks(a), y = toks(b);
+  if (!x.size || !y.size) return 0;
+  let inter = 0;
+  x.forEach(t => { if (y.has(t)) inter++; });
+  let sim = inter / (x.size + y.size - inter);
+  const la = String(a).toLowerCase().trim(), lb = String(b).toLowerCase().trim();
+  if (la && lb && (la.includes(lb) || lb.includes(la))) sim = Math.max(sim, 0.7);
+  return sim;
+}
+
+// id / name / placeholder / aria-label the recorder baked into the selectors
+function stepHints(step) {
+  const h = { id: '', name: '', placeholder: '', aria: '' };
+  for (const sel of step.selectors || []) {
+    let m;
+    if (!h.id && (m = /^#([^\s>:\[]+)$/.exec(sel))) h.id = m[1].replace(/\\/g, '');
+    if (!h.name && (m = /\[name="([^"]*)"\]/.exec(sel))) h.name = m[1];
+    if (!h.placeholder && (m = /\[placeholder="([^"]*)"\]/.exec(sel))) h.placeholder = m[1];
+    if (!h.aria && (m = /\[aria-label="([^"]*)"\]/.exec(sel))) h.aria = m[1];
+  }
+  return h;
+}
+
+function describeEl(el) {
+  return {
+    tag: el.tagName.toLowerCase(),
+    label: labelFor(el),
+    text: normText(el).slice(0, 60),
+    id: el.id || '',
+    name: el.getAttribute('name') || '',
+    placeholder: el.getAttribute('placeholder') || '',
+    aria: el.getAttribute('aria-label') || '',
+    type: el.type || '',
+  };
+}
+
+// 0..1 similarity between a recorded step and one candidate
+function localScore(step, h, d) {
+  const want = step.label || step.text || '';
+  const textPart = Math.max(
+    textSim(want, d.label),
+    step.text ? textSim(step.text, d.text) : 0,
+    h.placeholder ? textSim(h.placeholder, d.placeholder || d.label) : 0
+  );
+  let s = 0.55 * textPart;
+  if (h.id && h.id === d.id) s += 0.2;
+  if (h.name && h.name === d.name) s += 0.2;
+  if (h.placeholder && h.placeholder === d.placeholder) s += 0.15;
+  if (h.aria && h.aria === d.aria) s += 0.15;
+  if (step.tag && step.tag === d.tag) s += 0.1;
+  if (step.inputType && (step.inputType === d.type || (step.inputType === 'textarea' && d.tag === 'textarea'))) s += 0.1;
+  return Math.min(1, s);
+}
+
+// Turn scores into a probability that the top candidate is "the one". The
+// "none of these" option carries a fixed weight, so a lone weak match stays
+// unsure and several similar candidates dilute each other.
+function rankLocal(scored) {
+  const NONE = 0.12;
+  const w = scored.map(c => c.s * c.s);
+  const total = w.reduce((a, b) => a + b, NONE);
+  let best = -1;
+  w.forEach((v, i) => { if (best < 0 || v > w[best]) best = i; });
+  if (best < 0) return null;
+  return { el: scored[best].el, conf: w[best] / total, source: 'local' };
+}
+
+async function askModel(step, top) {
+  const criteria = {};
+  top.forEach((c, i) => {
+    const bits = [`${c.d.tag} "${c.d.label}"`];
+    if (c.d.id) bits.push(`id=${c.d.id}`);
+    if (c.d.name) bits.push(`name=${c.d.name}`);
+    if (c.d.type) bits.push(`type=${c.d.type}`);
+    criteria['c' + (i + 1)] = bits.join(' ');
+  });
+  criteria.none = 'None of these is the same control';
+  const rec = [`${step.type} on a ${step.tag || step.inputType || 'field'}`];
+  if (step.label) rec.push(`labelled "${step.label}"`);
+  if (step.text) rec.push(`with text "${step.text}"`);
+  const h = stepHints(step);
+  if (h.id) rec.push(`id=${h.id}`);
+  if (h.name) rec.push(`name=${h.name}`);
+  if (h.placeholder) rec.push(`placeholder="${h.placeholder}"`);
+  const state = `A UI test recorded this step, but its element can no longer be found on page "${location.pathname}": ${rec.join(', ')}. The app may have renamed or restyled it.`;
+  let res;
+  try {
+    res = await chrome.runtime.sendMessage({
+      cmd: 'AI_DECIDE',
+      state,
+      questions: { match: { type: 'choice', instructions: 'Which candidate is the same control the test originally targeted? Answer none if no candidate is clearly the same control.', criteria } },
+    });
+  } catch (e) { return null; }
+  const a = res && res.ok && res.answers && res.answers.match;
+  if (!a || typeof a.choice !== 'string') return null;
+  const m = /^c(\d+)$/.exec(a.choice);
+  const cand = m && top[+m[1] - 1];
+  if (!cand) return null;
+  const p = a.probabilities && !Array.isArray(a.probabilities) ? a.probabilities[a.choice] : null;
+  const conf = typeof p === 'number' ? p : (typeof a.confidence === 'number' ? a.confidence : 0);
+  return { el: cand.el, conf, source: 'model' };
+}
+
+async function healStep(step) {
+  const sel = CAND_SEL[step.type];
+  if (!sel) return null;
+  const els = [...document.querySelectorAll(sel)].filter(e => isVisible(e) && !host.contains(e));
+  if (!els.length) return null;
+  const h = stepHints(step);
+  const scored = els.map(el => { const d = describeEl(el); return { el, d, s: localScore(step, h, d) }; });
+  const local = rankLocal(scored);
+  if (local && local.conf >= HEAL_SKIP_MODEL) return local;
+  const top = scored.slice().sort((a, b) => b.s - a.s).slice(0, HEAL_MAX_CANDS);
+  const ai = await askModel(step, top);
+  if (ai && ai.conf >= HEAL_MIN_CONF) return ai;
+  return local && local.conf >= HEAL_MIN_CONF ? local : null;
 }
 
 /* ============================================================
@@ -1188,7 +1325,17 @@ async function runAutomation(auto, startIndex, resumed) {
         saveRun(auto.id, i + 1);
         continue;
       }
-      const el = await resolveStep(st, 4000);
+      let el = await resolveStep(st, 4000, false);
+      let healed = null;
+      if (!el) {
+        healed = await healStep(st);
+        if (healed) {
+          el = healed.el;
+          bubble(`${stepName(st)} changed, but I'm ${Math.round(healed.conf * 100)}% sure this is it${healed.source === 'model' ? ' (AI)' : ''}!`, 1800);
+          await sleep(900);
+        }
+      }
+      if (!el) el = await resolveStep(st, 50, true); // last resort: whatever sits at the recorded point
       if (!el) {
         st.__rect = null;
         await failRun(st, i, steps.length, `${stepName(st)} is GONE! It was here when you recorded.`);
@@ -1208,7 +1355,7 @@ async function runAutomation(auto, startIndex, resumed) {
           await failRun(st, i, steps.length, `${stepName(st)} is DISABLED! Someone nerfed it.`);
           return { ok: false, failedAt: i, reason: 'disabled' };
         }
-        if (st.text && normText(el) && normText(el) !== st.text) {
+        if (!healed && st.text && normText(el) && normText(el) !== st.text) {
           bubble(`Hmm, its label changed to "${normText(el).slice(0, 26)}". Clicking anyway!`, 1700);
           await sleep(900);
         }

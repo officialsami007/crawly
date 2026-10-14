@@ -291,7 +291,55 @@ async function setTheme(t) {
   try { await send('SET_THEME', { theme: t }); } catch (e) {}
 }
 
+const AI_HOSTS = {
+  laya: 'http://127.0.0.1:8000/*',
+  typesafe: 'https://api.typesafe.ai/*',
+  vercel: 'https://ai-gateway.vercel.sh/*',
+};
+const AI_NOTES = {
+  laya: 'Start it once with: pip install "laya[serve]" then laya-serve. Nothing leaves your computer.',
+  typesafe: 'Sends labels of nearby buttons and fields (never typed values) to TypeSafe.',
+  vercel: 'Sends labels of nearby buttons and fields (never typed values) to Vercel.',
+};
+
+async function renderAI() {
+  const { settings = {} } = await chrome.storage.local.get('settings');
+  const ai = settings.ai || {};
+  const ep = ai.endpoint || 'laya';
+  $('aiOn').checked = !!ai.enabled;
+  $('aiBox').hidden = !ai.enabled;
+  $('aiEndpoint').value = ep;
+  $('aiKey').hidden = ep === 'laya';
+  $('aiKey').value = ai.key || '';
+  $('aiNote').textContent = AI_NOTES[ep];
+}
+
+async function saveAI(changes) {
+  const { settings = {} } = await chrome.storage.local.get('settings');
+  settings.ai = Object.assign({ enabled: false, endpoint: 'laya', key: '' }, settings.ai, changes);
+  await chrome.storage.local.set({ settings });
+  return settings.ai;
+}
+
 async function init() {
+  $('aiOn').addEventListener('change', async e => {
+    const on = e.target.checked;
+    if (on) {
+      // permissions.request has to run straight from the click, before any await
+      const granted = await chrome.permissions.request({ origins: [AI_HOSTS[$('aiEndpoint').value]] });
+      if (!granted) { e.target.checked = false; toast('Crawly needs permission to reach the model.'); return; }
+    }
+    await saveAI({ enabled: on });
+    renderAI();
+  });
+  $('aiEndpoint').addEventListener('change', async e => {
+    const granted = await chrome.permissions.request({ origins: [AI_HOSTS[e.target.value]] });
+    if (!granted) { await renderAI(); toast('Crawly needs permission to reach that host.'); return; }
+    await saveAI({ endpoint: e.target.value });
+    renderAI();
+  });
+  $('aiKey').addEventListener('change', e => saveAI({ key: e.target.value.trim() }));
+
   $('ver').textContent = 'v' + chrome.runtime.getManifest().version;
   $('tNoir').addEventListener('click', () => setTheme('noir'));
   $('tHero').addEventListener('click', () => setTheme('hero'));
@@ -338,6 +386,7 @@ async function init() {
 
   tab = await getTab();
   renderTheme();
+  renderAI();
   if (!tab || !tab.id) { dead('No tab found.', false); return; }
   const ok = await refreshState();
   if (ok) renderLists();
